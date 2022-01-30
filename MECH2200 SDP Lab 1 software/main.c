@@ -74,17 +74,35 @@ volatile unsigned char GLOBAL_RxString[RX_STRING_LENGTH];
 volatile unsigned int GLOBAL_StepperMotorSpeed;
 volatile unsigned int GLOBAL_DirectionStatus;
 
+volatile unsigned int GLOBAL_Floor1Position = 0;
+volatile unsigned int GLOBAL_Floor2Position = 1;
+volatile unsigned int GLOBAL_Floor3Position = 2;
+
+volatile unsigned int GLOBAL_MaxPosition = 100;
+
+//***************************************************************
+//interrupt routine
+void __interrupt () HIGH_ISR(void)
+{
+    if(PIR1bits.RCIF)
+    {
+    reach_bottom = 1;
+    PIR1bits.RCIF = 0;
+    }
+    if(PIR2bits.RCIF)
+    {
+        reach_top = 1;
+        PIR2bits.RCIF = 0;
+    }
+}
+
 
 
 //list functions
-void    DisplaySystemOptionsList(void);
-void    DisplayStringError(unsigned int);
-void    TestDAC(unsigned int);
-void    TestPWM_16Bit(unsigned int);
-void    TestStepperMotor(void);
-void    DisplayStepperMotorOptionsList(unsigned int);
-void    SetStepperMotorSpeed(void);
-void    DisplayStepperMotorStatus(void);
+void DisplayStringError(unsigned int ErrorValue);
+void MainMenu();
+void RunElevator();
+void CalibrationMenu();
 
 
 
@@ -167,216 +185,6 @@ void main(void) {
     return;
 }
 
-//*********************************************
-//test PWM 16 bit. Enter a number between 1000 and 2000 to change the duty cycle
-//Time in microseconds. Enter 0 to exit
-
-void    TestPWM_16Bit(unsigned int PWM_Number)
-{
-    unsigned int Status = 0;
-    unsigned int StringStatus;
-    unsigned int Value;
-    
-    //loop until exit character received
-    while(Status == 0)
-    {
-        //send the command string
-        StringStatus = GetString(4,GLOBAL_RxString);
-        if(StringStatus != STRING_OK)
-        {
-            //string error
-            DisplayStringError(StringStatus);
-        }
-        else
-        {
-            //convert string to binary
-            Value = StringToInteger(GLOBAL_RxString);
-            //test for string value
-            if(Value == 0)
-            {
-                //exit PWM test
-                Status = 1;
-            }
-            else if(Value < 1000)   
-            {
-                //string value is too small
-                //string error
-                DisplayStringError(VALUE_TOO_SMALL);
-            }
-            else if(Value > 2000)
-            {
-                //string value is too big
-                //string error
-                DisplayStringError(VALUE_TOO_LARGE);
-            }
-            else
-            {
-                //test for which PWM to change
-                switch(PWM_Number)
-                {
-                    case 3: //load PWM 5 time value
-                        GLOBAL_PWM3_PulseTime = Value;
-                        break;
-
-                    case 4: //load PWM 6 time value
-                        GLOBAL_PWM4_PulseTime = Value;
-                        break;
-
-                    //No default
-                }
-
-            }
-        }
-    }
-    //reset PWM values to 1500
-    GLOBAL_PWM3_PulseTime = 1500;
-    GLOBAL_PWM4_PulseTime = 1500;
-}
-
-
-
-//*********************************************
-//test stepper motor.
-//this has a secondary HMI for selecting direction, speed and motor on/off
-
-void    TestStepperMotor(void)
-{
-    unsigned int Status = 0;
-    unsigned int StringStatus;
-    unsigned int Value;
-    unsigned int MotorStopStatus;
-    
-    //set for stepper mode
-    SetDRV8711_Mode(STEPPER_MODE);
-    
-    //set direction to clockwise
-    GLOBAL_DirectionStatus = 0;
-
-    //run motor control options menu
-    while(Status == 0)
-    {
-        //display status
-        DisplayStepperMotorStatus();
-        //display options list
-        DisplayStepperMotorOptionsList(STEPPER_MOTOR);
-
-        //test for any string entry
-        StringStatus = GetString(1,GLOBAL_RxString);
-        if(StringStatus != STRING_OK)
-        {
-            //string error
-            DisplayStringError(StringStatus);
-        }
-        else
-        {
-            //string ok
-            //convert string to binary value
-            Value = StringToInteger(GLOBAL_RxString);
-            //test for required action
-            switch(Value)
-            {
-                case 1:     //toggle motor direction
-                    if(GLOBAL_DirectionStatus == 0)
-                    {
-                        //change from clockwise to anticlockwise
-                        DRV8711_DIR_WRITE = 0b1;
-                        GLOBAL_DirectionStatus = 1;
-                    }
-                    else
-                    {
-                        //change from anticlockwise to clockwise
-                        DRV8711_DIR_WRITE = 0b0;
-                        GLOBAL_DirectionStatus = 0;
-                    }
-                    break;
-
-                case 2:     //set motor speed
-                    SetStepperMotorSpeed();
-                    break;
-
-                case 3:     //switch motor on until character received
-                    SendMessage(MotorRunningMessage);
-                    //stepper is off therefore turn it on
-                    MotorOn();
-                    //enable the stepper interrupt timer
-                    StepperTimerOn();
-                    //wait for character to exit
-                    MotorStopStatus = 0;
-                    while(MotorStopStatus == 0)
-                    {
-                        Value = GetChar();
-                        if(Value != 0xFFFF)
-                        {
-                            MotorStopStatus = 1;
-                        }
-                    }
-                    //disable the stepper interrupt timer
-                    StepperTimerOff();
-                    //set the step output to 0
-                    DRV8711_STEP_WRITE = 0b0;
-                    //switch motor drive off
-                    MotorOff();
-                    break;
-
-                case 4:     //return to main screen
-                    Status = 1;
-                    break;
-
-                default:    //invalid entry
-                    SendMessage(InvalidNumber);
-            }
-        }
-    }
-    //ensure the stepper interrupt timer is off
-    StepperTimerOff();
-    //set the step output to 0
-    DRV8711_STEP_WRITE = 0b0;
-    //ensure that motor drive is off
-    MotorOff();
-    //set stepper direction output to 0 and clockwise
-    DRV8711_DIR_WRITE = 0; 
-}
-
-
-
-//***********************************************
-//Set stepper motor speed. load a value between 500 and 9999
-
-void    SetStepperMotorSpeed(void)
-{
-    unsigned int    Value;
-    unsigned int    StringStatus; 
-    
-    //send the command string
-    //get the string, maximum 4 characters
-    StringStatus = GetString(4,GLOBAL_RxString);
-    if(StringStatus != STRING_OK)
-    {
-        //string error
-        DisplayStringError(StringStatus);
-    }
-    else
-    {
-        //convert string to binary
-        Value = StringToInteger(GLOBAL_RxString);
-        //test for value too small
-        if(Value < 500)
-        {
-            DisplayStringError(VALUE_TOO_SMALL);
-        }
-        else
-        {
-            //load the speed value into the speed control register
-            GLOBAL_StepperMotorSpeed = Value;
-        }
-    }
-}    
-    
-
-
-//*********************************************
-//display string error
-
 void    DisplayStringError(unsigned int ErrorValue)
 {
     switch(ErrorValue)
@@ -405,8 +213,8 @@ void    DisplayStringError(unsigned int ErrorValue)
     }
 }
 
-
 void    MainMenu(){
+    unsigned int StringStatus;
     while(1)
     {
         //Print options to user
@@ -445,12 +253,32 @@ void    MainMenu(){
 }
 
 void    RunElevator(){
-
+    unsigned int StringStatus;
+    unsigned int Value;
+    //While
+        //Move to bottom "floor"
+        //Open Door
+        //Ask User to enter a floor number
+        //Check if already at floor
+        //Close door
+        //Move to floor
+        //Open Door
 }
 
 void    CalibrationMenu(){
-
+    unsigned int StringStatus;
+    unsigned int Value;
+    //Move motor to bottom endstop
+    //Set current motor position to 0
+    //Move motor up until top endstop is hit
+    //Set as max motor position
+    //Allow user to enter a floor number
+    // Move to floor
+    // Ask user if position is ok
+    // Allow user to adjust position of motor /0.1/1/10mm
+    // Save floor position to global variable
 }
 
-
-
+void    MoveStepper(double mm){
+    //Step Motor for amount of steps = mm
+}
